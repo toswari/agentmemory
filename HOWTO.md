@@ -1,23 +1,24 @@
 ---
-name: LM Studio Embedding Integration
-version: 1.0.0
+name: AgentMemory Setup Guide — Hybrid Search (BM25 + Vector)
+version: 2.0.0
 date: 2026-05-27
 author: Teddy Oswari (fork of toswari/agentmemory)
-description: Guide for using LM Studio as local embedding provider instead of cloud APIs
+description: Complete guide for configuring agentmemory with LM Studio embeddings, BM25+Vector hybrid search, and integration with Hermes Agent + OpenCode
 ---
 
-# LM Studio Embedding Integration for AgentMemory
+# AgentMemory Setup Guide — Hybrid Search (BM25 + Vector)
 
 ## Overview
 
-This fork of [toswari/agentmemory](https://github.com/toswari/agentmemory) enables **zero-cost, offline embeddings** by routing through [LM Studio](https://lmstudio.ai/) instead of cloud APIs.
+This fork of [toswari/agentmemory](https://github.com/toswari/agentmemory) enables **zero-cost, offline embeddings** via [LM Studio](https://lmstudio.ai/) and **hybrid search** combining BM25 keyword matching with vector semantic similarity for superior memory retrieval.
 
 ### Why Use This Setup?
 
 - **Zero API costs** — all embedding generation happens locally
 - **Privacy** — no text data leaves your machine
-- **Offline capability** — works without internet once model is downloaded
-- **Full compatibility** — leverages existing OpenAIEmbeddingProvider in agentmemory
+- **Hybrid search accuracy** — combines BM25 (keyword) + Vector (semantic) scoring
+- **Offline capability** — works without internet once models are downloaded
+- **Full agent integration** — MCP server connects to Hermes Agent and OpenCode
 
 ---
 
@@ -63,22 +64,31 @@ Expected output should show a **768-dimensional vector** array.
 
 ---
 
-## Configuration (Option A — Recommended)
+## Step 1: Environment Configuration
 
-Use environment variables to redirect agentmemory's OpenAI embedding calls to LM Studio.
-
-### Add to Your Shell Config
-
-Add these lines to `~/.bashrc` or `~/.zshrc`:
+### Add to Your Shell Config (`~/.zshrc` or `~/.bashrc`)
 
 ```bash
-# >>> agentmemory — LM Studio Embedding Configuration <<<
+# >>> agentmemory — Hybrid Search & MCP Configuration <<<
+# Enable all MCP tools (default shows only core 8)
+export AGENTMEMORY_TOOLS=all
+
+# Hybrid search weights: BM25=0.4, VECTOR=0.6 (semantic > keyword by default)
+export BM25_WEIGHT=0.4
+export VECTOR_WEIGHT=0.6
+
+# Search precision tuning
+export SEARCH_TOP_K=10
+export SEARCH_MIN_SCORE=0.3
+
+# Embedding provider for agentmemory vector search
 export OPENAI_BASE_URL=http://localhost:1234/v1
 export OPENAI_API_KEY=not-needed
 export OPENAI_EMBEDDING_MODEL=text-embedding-nomic-embed-text-v1.5
 export OPENAI_EMBEDDING_DIMENSIONS=768
 export EMBEDDING_PROVIDER=openai
-# <<< agentmemory — LM Studio Embedding Configuration >>>
+
+# <<< agentmemory Configuration >>>
 ```
 
 > **Note:** `EMBEDDING_PROVIDER=openai` forces the OpenAI provider selection, which then routes to your local LM Studio via `OPENAI_BASE_URL`.
@@ -91,7 +101,7 @@ source ~/.zshrc   # or source ~/.bashrc
 
 ---
 
-## Using agentmemory-ctl (Recommended)
+## Step 2: Start AgentMemory MCP Server
 
 A control utility has been created at `~/.local/bin/agentmemory-ctl` to manage the MCP server.
 
@@ -127,33 +137,152 @@ tail -f ~/.local/log/agentmemory.log
 
 ---
 
-## How It Works (Under the Hood)
+## Step 3: Configure Your Agent (Hermes or OpenCode)
 
-### Request Flow
+### Option A: Hermes Agent Configuration
+
+Add this to `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  agentmemory:
+    url: http://localhost:3111/mcp
+    enabled: true
+    tools_filter: all   # Loads all 53 MCP tools (default shows only core 8)
+  gitnexus:             # Optional — code intelligence MCP server
+    url: http://localhost:4747/mcp
+    enabled: true
+    tools_filter: core
+```
+
+After updating config, restart Hermes to reload MCP servers.
+
+### Option B: OpenCode Configuration
+
+OpenCode connects via the SDK dynamically and inherits environment variables automatically. Ensure these are active in your shell before launching opencode:
+
+```bash
+# Environment variables from ~/.zshrc handle this automatically
+AGENTMEMORY_TOOLS=all \
+BM25_WEIGHT=0.4 \
+VECTOR_WEIGHT=0.6 \
+OPENAI_BASE_URL=http://localhost:1234/v1 \
+EMBEDDING_PROVIDER=openai \
+opencode <your-command>
+```
+
+Or simply run opencode normally — env vars are inherited from your shell profile:
+
+```bash
+# Just run opencode (env vars already in ~/.zshrc)
+opencode <command>
+```
+
+---
+
+## Step 4: Verify Hybrid Search Configuration
+
+### Verify LM Studio Embedding Endpoint
+
+```bash
+curl -X POST http://localhost:1234/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model":"text-embedding-nomic-embed-text-v1.5","input":["test"],"encoding_format":"float"}'
+```
+
+Expected output should show a **768-dimensional vector** array.
+
+### Verify AgentMemory MCP Server Health
+
+```bash
+curl http://localhost:3111/health
+```
+
+Should return HTTP 200 with status information.
+
+### Verify Hybrid Search Weights Are Active
+
+Check the agentmemory logs for startup confirmation:
+
+```bash
+tail ~/.local/log/agentmemory.log | grep -E "BM25|VECTOR|Embedding"
+```
+
+Expected output includes:
+- `Embedding provider: openai` (or your configured provider)
+- `BM25 weight: 0.4`
+- `Vector weight: 0.6`
+- `AGENTMEMORY_TOOLS=all loaded, enabling all tools`
+
+### Test Hybrid Search Directly
+
+```bash
+curl -X POST http://localhost:3111/agentmemory/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"database migration patterns","top_k":5}'
+```
+
+Response should include both `vectorScore` and `bm25Score` for each result.
+
+---
+
+## How Hybrid Search Works
+
+The `memory_smart_search` tool combines two retrieval methods:
+
+### 1. Vector (Semantic) Search
+Uses embeddings to find conceptually similar content regardless of exact keywords.
+
+### 2. BM25 (Keyword) Search  
+Uses TF-IDF-like scoring for exact keyword matches — great for finding specific terms like function names, error codes, or API endpoints.
+
+### Weighted Scoring Formula
 
 ```
-agentmemory
-    ↓
-OpenAIEmbeddingProvider (src/providers/embedding/openai.ts)
-    ↓
-Uses OPENAI_BASE_URL environment variable
-    ↓
-http://localhost:1234/v1/embeddings  ← LM Studio endpoint
-    ↓
-Returns Float32Array vectors to vector-index.ts
+FinalScore = VECTOR_WEIGHT * semantic_score + BM25_WEIGHT * keyword_score
 ```
 
-### Key Files Modified/Referenced
+With defaults of **0.6 (vector) / 0.4 (BM25)**, semantic search is given more weight, but both contribute to results.
 
-| File | Role |
-|------|------|
-| `src/providers/embedding/openai.ts` | Uses OPENAI_BASE_URL for requests |
-| `src/config.ts` | detectEmbeddingProvider() respects EMBEDDING_PROVIDER override |
-| `src/state/vector-index.ts` | Stores/retrieves vectors with cosine similarity |
+### Tuning Guidelines
 
-### Vector Storage
+| Use Case | BM25_WEIGHT | VECTOR_WEIGHT | Why |
+|----------|-------------|---------------|-----|
+| Technical code queries | 0.5 | 0.5 | Keywords matter for function names, APIs |
+| Conceptual/explanatory queries | 0.3 | 0.7 | Semantics better for abstract questions |
+| Debugging specific errors | 0.6 | 0.4 | Error messages are keyword-heavy |
 
-agentmemory uses an **SQLite-backed vector index** (`src/state/vector-index.ts`) for local storage. Vectors are stored as BLOB columns and retrieved via cosine similarity queries. No external database (Chroma, Qdrant, Pinecone) required.
+---
+
+## Architecture Diagram
+
+```
+┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
+│   Agent/CLI     │     │  LM Studio           │     │   SQLite        │
+│                 │     │  (Port 1234)         │     │  Vector Index   │
+│  Hermes/Open-   │────▶│                      │     │  (Local DB)     │
+│  Code           │◀────│  Embedding Model:    │◀────│                 │
+└────────┬────────┘     │  nomic-embed-text   │     └─────────────────┘
+         │              └──────────────────────┘           ^
+         │                                                 |
+         ▼                                                 |
+┌─────────────────────────────────────────────────────────┐
+│              agentmemory MCP Server (Port 3111)          │
+│                                                         │
+│  Tools Available:                                       │
+│  • memory_smart_search   ← Hybrid BM25 + Vector search  │
+│  • memory_recall         ← Recall past sessions        │
+│  • memory_remember       ← Store new memories           │
+│  • memory_forget         ← Remove specific memories     │
+│  • memory_handoff        ← Share context across agents  │
+│  • memory_recap          ← Session summary              │
+│  • ... (53 tools total with AGENTMEMORY_TOOLS=all)      │
+└────────┬────────────────────────────────────────────────┘
+         │
+    Query/Recall
+         ▼
+                                                      Retrieve
+```
 
 ---
 
@@ -200,71 +329,34 @@ curl http://localhost:1234/v1/models | python3 -c "import json, sys; [print(m['i
 
 Update `OPENAI_EMBEDDING_MODEL` to match the exact model ID.
 
----
+### Hybrid Search Not Working (Only One Score)
 
-## Integration with Hermes Agent (Optional)
+If results only show either vectorScore OR bm25Score but not both:
 
-To use agentmemory as an MCP server within Hermes:
-
-### 1. Start agentmemory Server
-
-```bash
-agentmemory-ctl start
-```
-
-### 2. Configure Hermes MCP Client
-
-Add to `~/.hermes/config.yaml`:
-
-```yaml
-mcp_servers:
-  agentmemory:
-    url: http://localhost:3111/mcp
-    enabled: true
-```
-
-### 3. Verify Connection
-
-In a new Hermes session, run:
-```bash
-hermes mcp test agentmemory
-```
-
----
-
-## Architecture Diagram
-
-```
-┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
-│   Agent/CLI     │     │  LM Studio           │     │   SQLite        │
-│                 │     │  (Port 1234)         │     │  Vector Index   │
-│  agentmemory    │────▶│                      │     │  (Local DB)     │
-│  MCP Server     │◀────│  Embedding Model:    │◀────│                 │
-│  (Port 3111)    │     │  nomic-embed-text   │     └─────────────────┘
-│                 │     └──────────────────────┘           ^
-└────────┬────────┘                                        |
-         │                                                 |
-         ▼                                                 |
-  Agent Tools:                                            |
-  recall, remember,                                       |
-  forget, handoff, recap                                  |
-                                                         Query
-                                                      Retrieve
-```
+1. Verify both weights are non-zero: `echo $BM25_WEIGHT && echo $VECTOR_WEIGHT`
+2. Check agentmemory logs for errors during search initialization
+3. Ensure AGENTMEMORY_TOOLS=all is set (some tool subsets disable hybrid search)
 
 ---
 
 ## Quick Reference
 
-| Environment Variable | Value | Purpose |
-|---------------------|-------|---------|
-| `OPENAI_BASE_URL` | `http://localhost:1234/v1` | Redirect to LM Studio |
-| `OPENAI_API_KEY` | `not-needed` | Bypass auth (LM Studio local) |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Model name in LM Studio |
-| `OPENAI_EMBEDDING_DIMENSIONS` | `768` | Vector dimension count |
-| `EMBEDDING_PROVIDER` | `openai` | Force OpenAI provider selection |
+### Environment Variables
 
-## Commands Reference
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AGENTMEMORY_TOOLS` | `core` | MCP tools to load (`all`, `core`, or comma-separated list) |
+| `BM25_WEIGHT` | `0.4` | Weight for BM25 keyword scoring (0-1) |
+| `VECTOR_WEIGHT` | `0.6` | Weight for vector semantic scoring (0-1) |
+| `SEARCH_TOP_K` | `10` | Max results to return |
+| `SEARCH_MIN_SCORE` | `0.3` | Minimum combined score threshold |
+| `OPENAI_BASE_URL` | — | LM Studio endpoint URL |
+| `OPENAI_API_KEY` | `not-needed` | Bypass auth for local LM Studio |
+| `OPENAI_EMBEDDING_MODEL` | — | Model name in LM Studio |
+| `OPENAI_EMBEDDING_DIMENSIONS` | `768` | Vector dimension count |
+| `EMBEDDING_PROVIDER` | Auto-detected | Force provider selection |
+
+### Commands Reference
 
 ```bash
 # Shell config reload
@@ -286,4 +378,49 @@ tail -f ~/.local/log/agentmemory.log
 curl -X POST http://localhost:1234/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"model":"text-embedding-nomic-embed-text-v1.5","input":["hello"],"encoding_format":"float"}'
+
+# Test hybrid search via MCP server
+curl -X POST http://localhost:3111/agentmemory/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"your query here","top_k":5}'
+
+# Verify Hermes MCP connection (in new session)
+hermes mcp test agentmemory
+```
+
+---
+
+## Files Modified During Setup
+
+| File | Changes |
+|------|---------|
+| `~/projects/agentmemory/.env.example` | Added Section 11 — Hybrid Search Configuration |
+| `~/.hermes/config.yaml` | Added `mcp_servers.agentmemory` section with tools_filter |
+| `~/.zshrc` (or `~/.bashrc`) | Added environment variables for hybrid search + embeddings |
+
+---
+
+## Architecture Notes
+
+### Vector Storage
+
+agentmemory uses an **SQLite-backed vector index** (`src/state/vector-index.ts`) for local storage. Vectors are stored as BLOB columns and retrieved via cosine similarity queries. No external database (Chroma, Qdrant, Pinecone) required.
+
+### BM25 Index
+
+BM25 scoring is handled by `src/search/bm25-index.ts` — a lightweight in-memory implementation that computes TF-IDF-style scores without requiring Elasticsearch or other search engines.
+
+### Hybrid Search Flow
+
+```
+Query → Split into keywords + semantic representation
+     ↓
+BM25 index: Calculate keyword relevance scores
+Vector index: Retrieve semantic similarity via cosine distance
+     ↓
+Combine: weighted_sum = BM25_WEIGHT × bm25_score + VECTOR_WEIGHT × vector_score
+     ↓
+Filter: Apply SEARCH_MIN_SCORE threshold
+Sort: Descending by combined score
+Return: Top K results (SEARCH_TOP_K) with individual scores exposed
 ```
